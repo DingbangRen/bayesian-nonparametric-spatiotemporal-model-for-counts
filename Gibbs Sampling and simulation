@@ -1,0 +1,805 @@
+library(dplyr)
+library('LaplacesDemon')
+library('mvtnorm')
+library('MASS')
+library('truncnorm')
+
+######## initial values
+
+m = 20
+T = 5 
+p = 2
+
+k=3
+L=50
+
+a1 = 8
+a2 = 12
+
+a_0 = 3
+b_0 = 3
+
+psi <- 0.5
+
+rho <- 0.99
+O <- 1
+v <- O+1
+
+set.seed(54)
+######## 生成随机数据
+## Y: 3 x 20 生成 随机的response
+
+Y <- matrix(rnbinom(m*T,size = sample(2:5,1),p= rbeta(1,2,6)),T,m)
+Y
+##
+## Xt 是m x p,
+MCMC_initial<- list()
+
+
+X <- list()
+for(t in 1:T){
+  c <- matrix(0,m,p)
+  for ( i in 1:m){
+    
+    c[i,] <-rnorm(p,Y[t,i]/3,Y[t,i]/3) 
+  }
+  X[[t]] <- c
+}
+X
+MCMC_initial$X <- X
+
+#beta <- rnorm(p,0.5,0.5)
+#Omega <-diag(seq(1, 1.19,0.01))   # m x m的矩阵
+B <- diag(rnorm(p,0.0001,0.000001)) #  B是beta的 cov
+b <- as.vector(rnorm(p,0.0001,0.00001))
+beta <- rmvnorm(1,mean = b, B)
+
+beta
+MCMC_initial$beta <- beta
+
+(X[[t]]%*%t(beta))[2]
+
+delta <- c(rgamma(1,a1,1),rgamma(k-1,a2,1))
+delta
+
+# delta 太小 会导致theta 很大
+
+delta
+MCMC_initial$delta <- delta 
+
+# k x L
+
+
+tau_Theta_func <- function(d){
+  tau <- c()
+  Theta <- matrix(0,k,L)
+  for(i in 1:k){
+    if(i == 1){
+      tau[i] <- d[i]
+      Theta[i,] <- rnorm(L,0,1/tau[i])
+    }else{
+      tau[i] <- prod(d[1:i])
+      Theta[i,] <- rnorm(L,0,1/tau[i])
+    }    
+  }
+  return(list(tau,Theta))
+}
+
+tau<-tau_Theta_func(delta)[[1]]
+tau
+Theta <- tau_Theta_func(delta)[[2]]
+Theta
+# Theta 是jl , 为k x L维度
+MCMC_initial$tau <- tau
+MCMC_initial$Theta <- Theta
+
+## r_t
+r <- as.vector(rep(0,T)) 
+
+for (t in 1:T){
+  r[t] <- rgamma(1,a_0,1/b_0)
+}
+r ## dispersion number
+MCMC_initial$r <- r
+# 由于参数非整数 所以PG会出现报错 那么需要用 原理去推
+# xi must contain integers!!
+## omega_ti
+omega <- matrix(rep(0,T * m),T,m)
+
+pg <- function(a,c){
+  K <- 200
+  g <- rgamma(K,a,1)
+  
+  
+  gg <- c(rep(0,K))
+  for ( k in 1:K){
+    gg[k] <- g[k] / ((k-1/2)^2 + c^2/(4*pi^2))
+  }
+  return (sum(gg) / (2*pi^2) )
+}
+
+
+for (t in 1:T){
+  for(i in 1:m){
+    omega[t,i] <- pg(r[t]+Y[t,i],0)
+  }
+}
+## omega_t(s_i)
+omega
+MCMC_initial$omegma <- omega
+# omega: T x m
+
+## Omega: 为一个List 其中每个元素都是 m x m
+generate_Omega<- function(omega){
+  Omega <- list()
+  tt = 1
+  while(tt <= T){
+    Omega[[tt]] <- diag(omega[tt,])
+    tt = tt+1
+  }
+  return (Omega)
+}
+Omega<-generate_Omega(omega)
+Omega
+MCMC_initial$Omega <- Omega
+## Upsilon: m x m for eta_t :
+### eta_t 是 factor 所以是 k
+
+## Upsilon必须小才可以
+
+Uomega <- diag(rep(1,k))
+zeta <- k+1
+Upsilon <- rinvwishart(nu=zeta, Uomega)
+Upsilon
+
+MCMC_initial$Upsilon <- Upsilon
+#?rinvwishart
+
+## H(psi): T x T
+
+
+
+## eta ~ N(0,kappa \otimes H(\psi))
+# eta注意 排列成 m x T, 需要向量化时再as.vector
+
+## 生成 eta t 的
+
+symm <- function(v){
+  
+  inm <- matrix(0,length(v)-1,length(v))
+  for( i in 1:(length(v)-1)){
+    
+    inm[i,] <- c(rep(0,i),rev(rev(v)[-c(1:i)]))
+  }
+  
+  uppm <- rbind(v,inm)
+  rownames(uppm)<-NULL
+  
+  sym <- uppm + t(uppm)-diag(diag(uppm))
+  return(sym)
+}
+
+hpsi <- rep(0,T)
+t=1
+while(t <= T){
+  hpsi[t] <- psi^{t-1} 
+  t=t+1
+}
+
+#library(mvtnorm)
+H <- (1/(1-psi)^2)* symm(hpsi)
+
+H
+MCMC_initial$H <- H
+# Upsilon一定要小
+## 生成的  T*k  x  1. 由于eta 有T个分量构成  所以又可以分成 T x k的展开形式
+eta <- rmvnorm(1,mean = rep(0,T*k),kronecker(H,Upsilon))
+eta
+# matrix: 每一行 都是一个eta_t
+eta_matrix <- matrix((eta),nrow = T, ncol = k,byrow = T)
+eta_matrix
+
+MCMC_initial$eta <- eta
+MCMC_initial$eta_matrix <- eta_matrix
+
+##kappa
+
+Ktheta <- diag(1,O)
+kappa <- rinvgamma(v/2,Ktheta)
+kappa
+MCMC_initial$kappa <- kappa
+
+## W : 20 x 20
+#rep(c(0,1),2)
+symmatrix <- function(m){
+  r1 <- m
+  r1[lower.tri(r1)]<-0
+  return(r1+t(r1) - diag(diag(r1)))
+}
+
+W <- matrix(sample(rep(c(0,0,0,1),100),size=400) ,20,20 )
+
+r1 <- W
+r1[lower.tri(r1)] <- 0
+
+
+r2 <- r1+ t(r1)-diag(diag(r1))
+
+diag(r2)<-0
+W <- r2
+W
+MCMC_initial$W <- W
+
+rm(r1)
+rm(r2)
+## D
+D = diag(as.vector(W %*% (as.matrix(rep(1,nrow(W)), nrow(W),1))) )
+D
+MCMC_initial$D <- D
+## rho
+
+## F(rho) 需要是对称的 既然是对称的 则肯定是可逆的
+F_rho = ginv(D-rho*W)%>%symmatrix()
+F_rho
+MCMC_initial$F_rho <- F_rho
+## alpha~N(0,kappa * F_rho)
+# jl -> k x L
+# jl都是 独立的 所以
+
+
+Alpha<- list()
+
+for (j in 1:k){
+  
+  alpha <- t(rmvnorm(L, mean = rep(0,m), sigma = kappa * F_rho ))
+  Alpha[[j]] <-  alpha
+  #names(Alpha)[[j*l]] <- paste(as.character(j),as.character(l))
+  
+}
+
+Alpha
+
+MCMC_initial$Alpha <- Alpha
+#Alpha[[j]][,l] 则是 alpha_jl: m x 1
+
+## z_jl(s_i)也是一样
+
+Z <- Alpha # 为了得到相同的数据结构
+# 注意 先验 需要argmax_l P(xi_j(s_i)=l|- )
+# = Phi(a) prod [1-Phi]
+
+for (j in 1:k){
+  for (l in 1:L){
+    for (M in 1:m){
+      Z[[j]][M,l] <- rnorm(1,mean = Alpha[[j]][M,l],1)
+    }
+  }
+}
+Z
+MCMC_initial$Z <- Z
+## Xi的生成
+# cluster的piror生成 可以靠z 
+# 因为很明显的是 如果依照P(z>0,z<0)来算 那么
+# 越往后面就越小 说明如果按照 此种概率最大的标准
+# 那么所有的l 都是1 这是不对的
+# 所以先验的 可以依据  min l:z_{jl}(s_i)>0
+
+# 所以是需要从1,L中抽样的 
+## xi : k x m: 也就是cluster allocation
+### xi_j(s_i): 所以是j factor的 i 地点的cluster l
+
+## 每个元素的 计算 都要找到 对应的argmax_l P(xi=l|z)
+Xi <- matrix(rep(0,k * m),nrow = k,ncol = m)
+
+# P(z_jl(s_i)>0,z_{jr}(s_i)<0,\forall r < l)
+for ( j in 1:k){
+  for ( i in 1:m){
+    if(identical(which(Z[[j]][i,]>0),integer(0))){
+      Xi[j,i] <- 1
+    }else{
+      Xi[j,i] <-which(Z[[j]][i,]>0)[1] 
+    }
+  }
+}
+
+
+#which(c(-1,-3)>0)
+Xi
+MCMC_initial$Xi <- Xi
+##################################
+
+
+## 万一 没有符合 which(Z[[j]][i,]>0)的项 那怎么办
+
+## Xi的后验!! 与z 无关
+
+## xi_j(s_i) cluster
+
+
+# xi_ji \in [1,L]
+
+# 通过 P(z_{jl}(s_i)>0,z_{jr}(s_i)<0,\forall r<l)
+# 即判断 最小的>0 的 index 为l
+# xi是depend on z , z depends on a
+#testxi <- Xi
+#beta <- MCMC_initial$beta
+#Theta <- MCMC_initial$Theta
+Sample_Xi  <- function(Xi){
+  Xip <- Xi
+  
+  ### 对应 j,i
+  
+  prob_formass <- function(l){
+    alp <- rep(0,l)
+    if(l == 1){
+      alp <- pnorm(Alpha[[j]][i,1])
+    }else{
+      ll=1
+      while (ll <= l-1) {
+        alp[ll] <- 1- pnorm(Alpha[[j]][i,ll]) 
+        
+        ll= ll+1
+        
+      }
+      
+      alp[l] <- pnorm(Alpha[[j]][i,l]) 
+    }
+    return(prod(alp)) # 得到 P(xi_ji=l|)
+  }
+  
+  for(j in 1:k){
+    for(i in 1:m){
+      
+      max_l = rep(0,L)
+      xi_exp <- rep(0,L)
+      
+      for(l in 1:L){
+        
+        xi_exp_sum <- rep(0,T)
+        
+        
+        for (t in 1:T){
+          
+          xi_exp_sum[t]  <-( (Y[t,i] - (X[[t]][i,]) %*%t(beta)-
+                              Theta[j,l]*eta_matrix[t,j]-
+                              (t(diag(Theta[-j,Xi[-j,i]]))%*%eta_matrix[t,-j])) * omega[t,i] )^2
+          
+        }
+        xi_exp[l] <- exp((-1/2)*sum(xi_exp_sum))
+        
+        
+        max_l[l] <-prob_formass(l) * xi_exp[l]
+        
+      }
+      
+      ### xi_{ji} = l | -
+      if(length(which(max_l == max(max_l)))>1){
+        Xip[j,i] <- Xi[j,i]
+      }else{
+        Xip[j,i]<- which(max_l == max(max_l))}
+    }
+  }
+  return(Xip)
+}
+
+Xi <- Sample_Xi(Xi)
+
+#MCMCsam<-list()
+#MCMCsam[[1]] <- list(Xi=Xi,Theta = Theta)
+
+# theta_{jl}
+#Theta <- MCMC_initial$Theta
+Sample_Theta <- function(Theta){
+  Thenew<- Theta
+  
+  for (j in 1:k){
+    for ( l in 1:L){
+    
+      #sum(eta_matrix[,j]^2) # T x m
+      
+      #Xi # k x m
+      #omega # T x m
+      # eta_matrix[,j]^2 为 T维的向量
+      
+      
+      # apply(omega[,which(Xi[j,]==l) ],1,sum) 为T维向量
+      if(identical(which(Xi[j,]==l),integer(0))){
+        Thenew[j,l] <- rnorm(1,0,tau[j]^{-1})
+      }else{
+        if(length(which(Xi[j,]==l))==1){
+          V = (t(eta_matrix[,j]^2) %*% omega[,which(Xi[j,]==l)] +
+                 tau[j] )^{-1}
+        }else{
+          V = (t(eta_matrix[,j]^2) %*% apply(omega[,which(Xi[j,]==l)],1,sum) +
+                 tau[j] )^{-1}
+        }
+        
+        mu_jt <- matrix(0,T,m)
+        
+        
+        for (i in which(Xi[j,]==l)){
+          for (t in 1:T){
+            
+            mu_jt[t,i] <-(Y[t,i] - (X[[t]][i,]) %*% t(beta)-
+                            (t(diag(Theta[-j,Xi[-j,i]]))%*%eta_matrix[t,-j]) )
+            
+          }
+        }
+        
+        E = V * (t(diag(mu_jt[,which(Xi[j,]==l)] %*% 
+                          t(omega[,which(Xi[j,]==l)]))) %*% 
+                   eta_matrix[,j])
+        
+        Thenew[j,l]<-rnorm(1,E,V)
+      }
+    }
+  }
+  
+  return(Thenew)
+}
+
+Theta<-Sample_Theta(Theta)
+
+
+#####
+#z_{jl}(s_i)|-, Z:Z[[j]][i,l]
+
+Sample_Z <- function(Z){
+  Znew<-Z
+  # 对每个l 挑出满足 xi_{j}(s_i)>=l 的 j,i
+  # 再 对这些j,i 对应的 xi_{jl}(s_o) 后验更新
+  for(l in 1:L){
+    for(i in 1:m){
+      for(j in 1:k){
+        
+        if(Xi[j,i]<l){ 
+          next
+        } else if(Xi[j,i]==l){
+          Znew[[j]][i,l] <- rtruncnorm(1,a=0,
+                                       mean = Alpha[[j]][i,l],sd=1)
+        }else{
+          Znew[[j]][i,l] <- rtruncnorm(1,b=0,
+                                       mean = Alpha[[j]][i,l],sd=1) 
+          
+        }
+        
+      }
+    }
+  }
+  
+  return(Znew)
+}
+
+Z <- Sample_Z(Z)
+
+
+  ## Alpha后验
+Sample_Alpha<-function(Alpha){
+  Alphanew <- Alpha
+  # 为了方便之后的solve(F_rho)是对称的 可以忽略误差
+  for( j in 1:k){
+    for(l in 1:L){
+      
+      # ginv(F_rho) 不对称 且F_rho本来就要求对称
+      # 可忽略warning
+      Alphanew[[j]][,l] <-t(rmvnorm(1,mean=
+                                      solve(diag(rep(1,m))+kappa^{-1}*symmatrix(ginv(F_rho)))%*%Z[[j]][,l] ,
+                                    solve(diag(rep(1,m))+kappa^{-1}*symmatrix(ginv(F_rho)))))
+      suppressWarnings(warning('
+        In rmvnorm(1, mean = solve(diag(rep(1, m)) + kappa^{ :
+    sigma is numerically not positive semidefinite'))
+    }
+  }
+  return(Alphanew)
+}
+
+Alpha <- Sample_Alpha(Alpha)
+## kappa 后验
+
+Sample_kappa<-function(kappa){
+  kappanew <- kappa 
+  
+  kappanewmatrix <- matrix(0,k,L)
+  
+  for(j in 1:k){
+    for(l in 1:L){
+      kappanewmatrix[j,l] <- t(Alpha[[j]][,l]) %*% symmatrix(ginv(F_rho)) %*% Alpha[[j]][,l]
+    }
+  }
+  kappanew <- rinvgamma(1, (m*k*L+(O+1))/2,(sum(kappanewmatrix)+1)/2)
+  return(kappanew)
+}
+
+kappa <- Sample_kappa(kappa)
+
+## delta_h
+#delta <- MCMC_initial$delta
+
+Sample_delta<-function(delta){
+  deltanew <- delta
+  # 可以用于更新tau 但是Theta就不用了 因为Theta 还需要depend on data
+  for( h in 1:k){
+    
+    delta_sum <- rep(0,k)
+    del <- deltanew
+    del[h] <- 1
+    for(j in h:k){
+      
+      delta_sum[j] <- prod(del[1:j]) * sum(Theta[j,]^2)
+    }
+    
+    delta_update <- sum(delta_sum)
+    if(h == 1){
+      deltanew[h] <- rgamma(1,a1+(k+1-h)*L/2, delta_update/2+1) 
+    }else{
+      deltanew[h] <- rgamma(1,a2+(k+1-h)*L/2, delta_update/2+1)
+    }
+  }
+  
+  return(deltanew)
+}
+
+delta<-Sample_delta(delta)
+
+## need to resample via prod(delta_h)
+Sample_tau_usedelta<-function(delta){
+    taunew <- tau_Theta_func(delta)[[1]]
+    return(taunew)
+}
+
+tau<-Sample_tau_usedelta(delta)
+
+
+## eta_{tj}
+Lambda_generator <- function(Theta){
+  
+  tlambda <- matrix(0,k,m)
+  for( j in 1:k){
+    tlambda[j,]<-Theta[j,Xi[j,]] # 构成了Lambda^T的行
+  }
+  Lambda <- t(tlambda) # m x k
+  return(Lambda)
+}
+
+Lambda<-Lambda_generator(Theta)
+
+Sample_eta_matrixvector <- function(eta_matrix){
+  etamatrixnew <- eta_matrix
+  E_etat <- matrix(0,k,T)
+  V_etat <- list()
+  
+  E_eta <- matrix(0,k,T)
+  V_eta <- list()
+  
+  for(t in 1:T){
+    Hplus <-t(H[t,-t])%*%solve(H)[-t,-t]
+    Hstar <- H[t,t] - Hplus %*% H[-t,t]
+    
+    E_etat[,t]<-kronecker(Hplus,diag(rep(1,k))) %*% 
+      as.vector(t(eta_matrix[-t,]))
+    
+    V_etat[[t]]<-kronecker(Hstar,Upsilon)
+    
+    V_eta[[t]] <- solve(t(Lambda)%*%Omega[[t]]%*%Lambda + solve(V_etat[[t]]))
+    E_eta[,t] <- V_eta[[t]] %*% (t(Lambda)%*%Omega[[t]] %*% (Y[t,] - X[[t]]%*% t(beta)) + 
+                                   solve(V_etat[[t]]) %*% E_etat[,t])
+    
+    etamatrixnew[t,] <- rmvnorm(1,E_eta[,t],V_eta[[t]])
+    
+  }
+
+  #E_etat # k x T
+  #V_etat # V_eta[[t]][k,k]
+  #etamatrixnew # T x k
+  #eta_matrix <- etamatrixnew
+  etanew <- as.vector(t(eta_matrix))
+  return(list(eta=etanew,eta_matrix = etamatrixnew))
+} 
+
+eta<-Sample_eta_matrixvector(eta_matrix)[[1]]
+
+eta_matrix <- Sample_eta_matrixvector(eta_matrix)[[2]]
+#eta <- etanew
+
+
+#eta: T x k
+#Theta: k x L
+
+## beta
+Sample_beta<-function(beta){
+  Cbeta <- matrix(0,length(beta),length(beta))
+  Ebeta <-  matrix(0,length(beta),1)
+  
+  sumforC <- list()
+  sumforE <-list()
+  for( t in 1:T){
+    sumforC[[t]] <- t(X[[t]]) %*% Omega[[t]] %*% X[[t]]
+    sumforE[[t]] <- t(X[[t]]) %*% Omega[[t]] %*% (Y[t,] - Lambda %*% eta_matrix[t,])
+  }
+  
+  t = 1
+  SumforC <- matrix(0,length(beta),length(beta)) 
+  SumforE <- matrix(0,length(beta),1)
+  while (t <= T) {
+    
+    SumforC <- SumforC + sumforC[[t]]
+    SumforE <- SumforE + sumforE[[t]]
+    t=t+1
+  }
+  #rm(t)
+  
+  Cbeta <- solve(SumforC + T*solve(B))
+  Ebeta <- Cbeta %*% (SumforE + T*solve(B)%*%b)
+  
+  betanew <- rmvnorm(1,Ebeta,Cbeta)
+  return(betanew)
+}
+
+beta<-Sample_beta(beta)
+
+## Upsilon 后验
+#Upsilonnew <- Upsilon # k x k ~ IW()
+
+
+Sample_Upsilon_usingeta<-function(eta_matrix){
+  S_phi_psi <- t(eta_matrix)%*% solve(H) %*% eta_matrix
+
+  Upsilonnew <- rinvwishart(v+zeta,S_phi_psi + Uomega)
+  return(Upsilonnew)
+}
+
+Upsilon <-Sample_Upsilon_usingeta(eta_matrix)
+#?rinvwishart
+
+## omega 后验
+Sample_omega_matrixdiag<-function(omega){
+  omeganew <- omega
+  for (t in 1:T){
+    for(i in 1:m){
+      omeganew[t,i] <- pg(r[t]+Y[t,i],
+                          beta %*% X[[t]][i,] + t(Lambda[i,]) %*% eta_matrix[t,])
+    }
+  }
+  Omeganew <- list()
+  for(t in 1:T){
+    Omeganew[[t]] <- diag(omeganew[t,])
+  }
+  
+  return(list(omega=omeganew,Omega = Omeganew))
+}
+
+omega<-Sample_omega_matrixdiag(omega)[[1]]
+
+Omega <- Sample_omega_matrixdiag(omega)[[2]]
+## rt poster
+## J_{ti}
+# rgamma(1,1,1/4)
+#rgamma(1,1,1/10)
+
+
+## 体现 是 1/b 的 b 太大了 即 sum | ln(1-p) | 
+Sample_r_andJ<-function(r){
+  #r <- MCMC_initial$r
+  prob_ti <- matrix(0,T,m)
+  for(t in 1:T){
+    for(i in 1:m){
+      prob_ti[t,i] <- exp(beta %*% X[[t]][i,] + 
+                            t(Lambda[i,]) %*% eta_matrix[t,])/(1+exp(beta %*% X[[t]][i,]+
+                                                                       t(Lambda[i,]) %*% eta_matrix[t,]))
+    }
+  }
+     ## J 应该直接是调用后验
+  ## 因为对rt 来说 用的是 后验的J 而不是先验的
+  poly_r <-function(r,m){
+    rpoly <- c()
+    for(j in 1:m){
+      rpoly[j] <- r^j
+    }
+    return(rpoly)
+  }
+  
+  J_ti <- matrix(0,T,m)
+  rnew <- r
+  
+  for(t in 1:T){
+    
+    for(i in 1:m){
+      
+      if(Y[t,i]==0){
+        J_ti[t,i] <- 0
+      }else if(Y[t,i]==1){
+        # 此时 J_{ti}可以=0,1
+        # 但是 y=1, 而成分数=0 显然不对
+        # 所以只能是j=1
+        J_ti[t,i] <- 1
+      }else{
+        Fmatrix <- matrix(0,Y[t,i],Y[t,i])
+        Rmatrix <- matrix(0,Y[t,i],Y[t,i])
+        Fmatrix[1,1]<-1
+        #Rmatrix[1,1]<-1 
+        ## 还要想 如果 Y[t,i]=0,1
+        
+        for(row in 2:(Y[t,i])){
+          for(col in 1:row){
+            if(col == 1){
+              Fmatrix[row,col]<-(row-1)/row * Fmatrix[row-1,col]
+            }else{
+              Fmatrix[row,col]<-(row-1)/row * Fmatrix[row-1,col]+(1/row)*Fmatrix[row-1,col-1]
+            }
+          }
+        }
+        
+        for(row in 1:(Y[t,i])){
+          for(col in 1:row){
+            Rmatrix[row,col] <- (r[t]^col)*Fmatrix[row,col] / sum(Fmatrix[row,1:row]*poly_r(r[t],row))
+          }
+        }
+        # y_{t}(s_i) >0, J_{ti}一定>0, 因为后者是成份数
+        # 指的是 只有当m = 0才有j = 0,
+        # 如果m>0, 意味这y >0 , 则成份数一定>0
+        
+        # R matrix for  t,i, 即 R_{r_t}(y_t(s_i),j)
+        #R_rmatrix <- cbind(c(1,rep(0,nrow(Rmatrix))),rbind(rep(0,ncol(Rmatrix)),Rmatrix))
+        R_matrix_lastrow <- Rmatrix[nrow(Rmatrix),]
+        J_ti[t,i] <- which.max(R_matrix_lastrow)
+      }
+    }
+    rnew[t] <- rgamma(1,a_0+ sum(J_ti[t,]),1/(b_0 - sum(log(1-prob_ti[t,]))) )
+  }
+  return(list(J = J_ti,r = rnew))
+}
+r<-Sample_r_andJ(r)[[2]]
+
+####################################
+iterations <- 2
+MCMC_track <- list()
+
+#r<-MCMC_initial$r
+#Theta <- MCMC_initial$Theta
+#Lambda<-Lambda_generator(Theta)
+#delta <- MCMC_initial$delta
+#tau <- tau_Theta_func(delta)[[1]]
+#omega <- MCMC_initial$omegma
+#Omega <- MCMC_initial$Omega
+#eta <- MCMC_initial$eta
+
+
+for(itr in 1:iterations){
+  ##
+  Xi <- Sample_Xi(Xi)
+  
+  Theta<-Sample_Theta(Theta)
+  
+  Z <- Sample_Z(Z)
+  
+  Alpha <- Sample_Alpha(Alpha)
+  
+  kappa <- Sample_kappa(kappa)
+  ##
+  delta<-Sample_delta(delta)
+  
+  tau<-Sample_tau_usedelta(delta)
+  
+  Lambda<-Lambda_generator(Theta)
+  
+  eta<-Sample_eta_matrixvector(eta_matrix)[[1]]
+  
+  eta_matrix <- Sample_eta_matrixvector(eta_matrix)[[2]]
+  
+  beta<-Sample_beta(beta)
+  
+  Upsilon <-Sample_Upsilon_usingeta(eta_matrix)
+  
+  omega<-Sample_omega_matrixdiag(omega)[[1]]
+  
+  Omega <- Sample_omega_matrixdiag(omega)[[2]]
+  
+  r<-Sample_r_andJ(r)[[2]]
+  
+  MCMC_track[[itr]] <- list(Xi=Xi, Theta=Theta, Z=Z, Alpha=Alpha, kappa=kappa,
+                            delta=delta, tau=tau, Lambda=Lambda, eta=eta, eta_matrix=eta_matrix,
+                            beta=beta, Upsilon=Upsilon, omega=omega, Omega=Omega, r=r)
+  
+}
+MCMC_track[[2]]
+
