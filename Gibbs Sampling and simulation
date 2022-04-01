@@ -143,7 +143,7 @@ generate_Omega<- function(omega){
 Omega<-generate_Omega(omega)
 Omega
 MCMC_initial$Omega <- Omega
-## Upsilon: m x m for eta_t :
+## Upsilon: k x k for eta_t :
 ### eta_t 是 factor 所以是 k
 
 ## Upsilon必须小才可以
